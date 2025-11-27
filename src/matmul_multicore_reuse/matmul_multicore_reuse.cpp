@@ -10,14 +10,19 @@
 #include <tt-metalium/device.hpp>
 #include <tt-metalium/command_queue.hpp>
 #include <tt-metalium/tt_metal.hpp>
-#include "matmul_common/bmm_op.hpp"
-
-#include "utils.hpp"
+#include <tt-metalium/tensor_accessor_args.hpp>
+#include <bmm_op.hpp>
+#include <fmt/core.h>
+#include <iostream>
 
 using namespace tt::constants;
 using namespace std;
 using namespace tt;
 using namespace tt::tt_metal;
+
+#ifndef OVERRIDE_KERNEL_PREFIX
+#define OVERRIDE_KERNEL_PREFIX ""
+#endif
 
 void golden_matmul(
     std::vector<bfloat16>& a,
@@ -86,9 +91,6 @@ void matmul_multicore_reuse(
     uint32_t Mt = M / TILE_HEIGHT;
     uint32_t Kt = K / TILE_WIDTH;
     uint32_t Nt = N / TILE_WIDTH;
-    uint32_t KtNt = Kt * Nt;
-    uint32_t MtKt = Mt * Kt;
-    uint32_t MtNt = Mt * Nt;
 
     // NOTE: Only supports matmuls where output is blocks of 16 x 16 tiles (ie. multiples of 16*32 x 16*32)
     // NOTE: Maximum number of tiles in output is 120 * 16^2 = 30,720 (eg. [1, 1, 5120, 6144])2
@@ -105,10 +107,9 @@ void matmul_multicore_reuse(
     uint32_t out_subblock_h = std::get<2>(matmul_params);
     uint32_t out_subblock_w = std::get<3>(matmul_params);
 
-    log_info(tt::LogVerif, " -- Metalium Core Sizing --");
-    log_info(
-        tt::LogVerif,
-        " -- per_core_M= {} -- per_core_N= {} -- out_subblock_h= {} -- out_subblock_w= {} --",
+    fmt::print(" -- Metalium Core Sizing --\n");
+    fmt::print(
+        " -- per_core_M= {} -- per_core_N= {} -- out_subblock_h= {} -- out_subblock_w= {} --\n",
         per_core_M,
         per_core_N,
         out_subblock_h,
@@ -207,9 +208,6 @@ void matmul_multicore_reuse(
     auto src0_dram_buffer = CreateBuffer(dram_config_A);
     auto src1_dram_buffer = CreateBuffer(dram_config_B);
     auto dst_dram_buffer = CreateBuffer(dram_config_C);
-    uint32_t src0_addr = src0_dram_buffer->address();
-    uint32_t src1_addr = src1_dram_buffer->address();
-    uint32_t dst_addr = dst_dram_buffer->address();
 
     /*
      * Config of Circular Buffer in the device L1
@@ -218,12 +216,12 @@ void matmul_multicore_reuse(
     uint32_t src0_cb_index = CBIndex::c_0;  // 0
     CircularBufferConfig cb_src0_config = CircularBufferConfig(in0_CB_size, {{src0_cb_index, cb_data_format}})
                                               .set_page_size(src0_cb_index, single_tile_size);
-    auto cb_src0 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src0_config);
+    tt_metal::CreateCircularBuffer(program, all_cores, cb_src0_config);
 
     uint32_t src1_cb_index = CBIndex::c_1;  // 1
     CircularBufferConfig cb_src1_config = CircularBufferConfig(in1_CB_size, {{src1_cb_index, cb_data_format}})
                                               .set_page_size(src1_cb_index, single_tile_size);
-    auto cb_src1 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src1_config);
+    tt_metal::CreateCircularBuffer(program, all_cores, cb_src1_config);
 
     uint32_t output_cb_index = tt::CBIndex::c_16;
     uint32_t interm0_cb_index = 24;
@@ -232,18 +230,17 @@ void matmul_multicore_reuse(
     CircularBufferConfig cb_output_config = CircularBufferConfig(out_CB_size, output_cb_data_format_spec)
                                                 .set_page_size(output_cb_index, single_tile_size)
                                                 .set_page_size(interm0_cb_index, single_tile_size);
-    auto cb_output = tt_metal::CreateCircularBuffer(program, all_cores, cb_output_config);
+    tt_metal::CreateCircularBuffer(program, all_cores, cb_output_config);
 
     /*
      * Compile time arguments
      */
-    bool src0_is_dram = src0_dram_buffer->buffer_type() == tt_metal::BufferType::DRAM;
-    bool src1_is_dram = src1_dram_buffer->buffer_type() == tt_metal::BufferType::DRAM;
-    std::vector<uint32_t> reader_compile_time_args = {(uint32_t)src0_is_dram, (uint32_t)src1_is_dram};
+    std::vector<uint32_t> reader_compile_time_args;
+    TensorAccessorArgs(*src0_dram_buffer).append_to(reader_compile_time_args);
+    TensorAccessorArgs(*src1_dram_buffer).append_to(reader_compile_time_args);
 
-    bool dst_is_dram = dst_dram_buffer->buffer_type() == tt_metal::BufferType::DRAM;
-    // std::vector<uint32_t> writer_compile_time_args = {(std::uint32_t) output_cb_index, (uint32_t)dst_is_dram};
-    std::vector<uint32_t> writer_compile_time_args = {(uint32_t)dst_is_dram};
+    std::vector<uint32_t> writer_compile_time_args;
+    TensorAccessorArgs(*dst_dram_buffer).append_to(writer_compile_time_args);
 
     /*
      * Create Kernels (Reader, Writer, Compute)
@@ -251,7 +248,7 @@ void matmul_multicore_reuse(
     // Create reader and writer kernels per core
     auto reader_id = tt_metal::CreateKernel(
         program,
-        "tt_metal/programming_examples/matmul_common/kernels/dataflow/reader_bmm_tile_layout.cpp",
+        OVERRIDE_KERNEL_PREFIX "tt_metal/programming_examples/matmul/matmul_common/kernels/dataflow/reader_bmm_tile_layout.cpp",
         all_cores,
         tt_metal::DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
@@ -260,7 +257,7 @@ void matmul_multicore_reuse(
 
     auto writer_id = tt_metal::CreateKernel(
         program,
-        "tt_metal/programming_examples/matmul_common/kernels/dataflow/writer_bmm_tile_layout.cpp",
+        OVERRIDE_KERNEL_PREFIX "tt_metal/programming_examples/matmul/matmul_common/kernels/dataflow/writer_bmm_tile_layout.cpp",
         all_cores,
         tt_metal::DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_0,
@@ -268,9 +265,9 @@ void matmul_multicore_reuse(
             .compile_args = writer_compile_time_args});
 
     // Create compute kernel
-    auto mm_kernel_id = tt_metal::CreateKernel(
+    tt_metal::CreateKernel(
         program,
-        "tt_metal/programming_examples/matmul_common/kernels/compute/bmm_large_block_zm.cpp",
+        OVERRIDE_KERNEL_PREFIX "tt_metal/programming_examples/matmul/matmul_common/kernels/compute/bmm_large_block_zm.cpp",
         all_cores,
         tt_metal::ComputeConfig{.math_fidelity = math_fidelity, .compile_args = compute_kernel_args});
 
@@ -344,35 +341,16 @@ void matmul_multicore_reuse(
     // ReadFromBuffer(dst_dram_buffer, output);
     // ReadFromBuffer(src0_dram_buffer, output);
 
-	struct timeval start_time;
-    gettimeofday(&start_time, NULL);
     EnqueueWriteBuffer(cq, src0_dram_buffer, a.data(), false);
     EnqueueWriteBuffer(cq, src1_dram_buffer, b.data(), false);
-    Finish(cq);
-    double xfer_on_time=getElapsedTime(start_time);
-
-    gettimeofday(&start_time, NULL);
     EnqueueProgram(cq, program, false);
-    Finish(cq);
-    double exec_time=getElapsedTime(start_time);
-
-    gettimeofday(&start_time, NULL);
     EnqueueReadBuffer(cq, dst_dram_buffer, output.data(), true);
-    Finish(cq);
-    double xfer_off_time=getElapsedTime(start_time);
-
-    double total_time = xfer_on_time + exec_time + xfer_off_time;
-    printf("Total time %.4f sec (%.4f sec xferOn, %.4f sec exec, %.4f sec xferOff)\n", total_time, xfer_on_time, exec_time, xfer_off_time);
 }
 
 ///////////////////////////////////////
 
 int main() {
     bool pass = true;
-
-    if (getenv("TT_METAL_SLOW_DISPATCH_MODE") != nullptr) {
-        TT_THROW("Test not supported w/ slow dispatch, exiting");
-    }
 
     try {
         /* Silicon accelerator setup */
@@ -417,23 +395,21 @@ int main() {
         matmul_multicore_reuse(src0_vec, src1_vec, result_vec, false, M, N, K, B, device);
         result_vec = untilize_nfaces(result_vec, M, N);
 
-        log_info(tt::LogVerif, "Output vector of size {}", result_vec.size());
+        fmt::print("Output vector of size {}\n", result_vec.size());
 
         float pearson = check_bfloat16_vector_pcc(golden_vec, result_vec);
-        log_info(tt::LogVerif, "Metalium vs Golden -- PCC = {}", pearson);
+        fmt::print("Metalium vs Golden -- PCC = {}\n", pearson);
         TT_FATAL(pearson > 0.99, "PCC not high enough. Result PCC: {}, Expected PCC: 0.99", pearson);
 
         pass &= CloseDevice(device);
 
     } catch (const std::exception& e) {
-        tt::log_error(tt::LogTest, "Test failed with exception!");
-        tt::log_error(tt::LogTest, "{}", e.what());
-
+        fmt::print(stderr, "Test failed with exception! what: {}\n", e.what());
         throw;
     }
 
     if (pass) {
-        tt::log_info(tt::LogTest, "Test Passed");
+        fmt::print("Test Passed\n");
     } else {
         TT_THROW("Test Failed");
     }

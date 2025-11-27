@@ -1,5 +1,7 @@
 CXX     := clang++-17
 LINKER  := $(CXX)
+	
+#export LD_LIBRARY_PATH=/opt/llvm-17.0.6-omp:$LD_LIBRARY_PATH
 
 TT_INC  := -I$(TT_METAL_HOME)/tt_metal/api \
            -I$(TT_METAL_HOME)/tt_metal/api/tt-metalium \
@@ -7,9 +9,14 @@ TT_INC  := -I$(TT_METAL_HOME)/tt_metal/api \
            -I$(TT_METAL_HOME)/build_Release/include/metalium-thirdparty \
            -I$(TT_METAL_HOME)/build_Release/include/umd/device/device/api \
            -I$(TT_METAL_HOME)/tt_metal/hostdevcommon/api/ \
-           -I$(TT_METAL_HOME)/tt_metal/third_party/tracy/public
-
+           -I$(TT_METAL_HOME)/tt_metal/third_party/tracy/public \
+           -I./src/matmul_common \
+           -I./src
+		
 INCLUDES := -I./tt_power/tt_power -I/opt/llvm-17.0.6-omp 
+
+SRC_DIR := src
+BIN_DIR := bin
 
 CFLAGS  := $(TT_INC) $(INCLUDES) -O3 -Wno-int-to-pointer-cast -stdlib=libc++ -mavx2 -fPIC \
            -DFMT_HEADER_ONLY -fvisibility-inlines-hidden -fno-lto -DARCH_WORMHOLE \
@@ -24,34 +31,29 @@ CFLAGS  := $(TT_INC) $(INCLUDES) -O3 -Wno-int-to-pointer-cast -stdlib=libc++ -ma
 LFLAGS  := -rdynamic -L$(TT_METAL_HOME)/build_Release/lib \
            -ltt_metal -ldl -lstdc++fs -pthread -lyaml-cpp -lm -lc++ -ldevice -L/opt/llvm-17.0.6-omp -fopenmp
 
-SRC_DIR := src
-BIN_DIR := bin
-
 # List of programs (without extension)
 PROGRAMS := matmul_single_core \
             matmul_multi_core \
             matmul_multicore_reuse \
-            matmul_multicore_reuse_mcast \
-            matmul_multicore_reuse_mcast_args
+            matmul_multicore_reuse_mcast
 
-SRCS  := $(addprefix $(SRC_DIR)/,$(addsuffix .cpp,$(PROGRAMS)))
-OBJS  := $(SRCS:.cpp=.o)
-BINS  := $(addprefix $(BIN_DIR)/,$(PROGRAMS))
-
-.PHONY: all clean mkrefdir
-
-all: mkrefdir $(BINS)
-
+.PHONY: all clean mkrefdir matmul_single_core matmul_multi_core
 mkrefdir:
 	@mkdir -p $(BIN_DIR)
 
-# Generic rule to compile .cpp -> .o
-$(SRC_DIR)/%.o: $(SRC_DIR)/%.cpp
-	$(CXX) $(CFLAGS) -c $< -o $@
+matmul_single_core:
+	$(CXX) -I./src/matmul_single_core/kernels/dataflow $(CFLAGS) -o $(BIN_DIR)/matmul_single_core $(SRC_DIR)/matmul_single_core/matmul_single_core.cpp $(LFLAGS)
 
-# Generic rule to link .o -> binary
-$(BIN_DIR)/%: $(SRC_DIR)/%.o
-	$(LINKER) $< -o $@ $(LFLAGS)
+matmul_multi_core:
+	$(CXX) -I./src/matmul_multi_core/kernels/dataflow $(CFLAGS) -o $(BIN_DIR)/matmul_multi_core $(SRC_DIR)/matmul_multi_core/matmul_multi_core.cpp $(LFLAGS)
+
+matmul_multicore_reuse:
+	$(CXX) $(CFLAGS) -o $(BIN_DIR)/matmul_multicore_reuse $(SRC_DIR)/matmul_multicore_reuse/matmul_multicore_reuse.cpp $(LFLAGS)
+
+matmul_multicore_reuse_mcast:
+	$(CXX) $(CFLAGS) -o $(BIN_DIR)/matmul_multicore_reuse_mcast $(SRC_DIR)/matmul_multicore_reuse_mcast/matmul_multicore_reuse_mcast.cpp $(LFLAGS)
 
 clean:
-	$(RM) $(OBJS) $(BINS)
+	$(RM) -r $(BIN_DIR)
+
+all: mkrefdir matmul_single_core matmul_multi_core matmul_multicore_reuse matmul_multicore_reuse_mcast 

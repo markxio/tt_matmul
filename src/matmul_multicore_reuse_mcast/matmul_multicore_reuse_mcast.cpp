@@ -10,15 +10,10 @@
 #include <tt-metalium/command_queue.hpp>
 #include <tt-metalium/device.hpp>
 #include <tt-metalium/tt_metal.hpp>
-#include "matmul_common/bmm_op.hpp"
+#include <tt-metalium/tensor_accessor_args.hpp>
+#include <matmul_common/bmm_op.hpp>
 #include <algorithm>
-
-#include "tt_power.hpp"
-#include "utils.hpp"
-#include <omp.h>
-#include <cstdlib>
-#include <iostream>
-#include <fstream>
+#include "tt-metalium/core_coord.hpp"
 
 using namespace tt::constants;
 using namespace std;
@@ -111,10 +106,9 @@ void matmul_multicore_reuse_mcast(
     uint32_t out_subblock_h = std::get<2>(matmul_params);
     uint32_t out_subblock_w = std::get<3>(matmul_params);
 
-    log_info(tt::LogVerif, " -- Metalium Core Sizing --");
-    log_info(
-        tt::LogVerif,
-        " -- per_core_M= {} -- per_core_N= {} -- out_subblock_h= {} -- out_subblock_w= {} --",
+    fmt::print(" -- Metalium Core Sizing --\n");
+    fmt::print(
+        " -- per_core_M= {} -- per_core_N= {} -- out_subblock_h= {} -- out_subblock_w= {} --\n",
         per_core_M,
         per_core_N,
         out_subblock_h,
@@ -271,13 +265,12 @@ void matmul_multicore_reuse_mcast(
     /*
      * Compile time arguments
      */
-    bool src0_is_dram = src0_dram_buffer->buffer_type() == tt_metal::BufferType::DRAM;
-    bool src1_is_dram = src1_dram_buffer->buffer_type() == tt_metal::BufferType::DRAM;
-    std::vector<uint32_t> reader_compile_time_args = {(uint32_t)src0_is_dram, (uint32_t)src1_is_dram};
+    std::vector<uint32_t> reader_compile_time_args;
+    TensorAccessorArgs(*src0_dram_buffer).append_to(reader_compile_time_args);
+    TensorAccessorArgs(*src1_dram_buffer).append_to(reader_compile_time_args);
 
-    bool dst_is_dram = dst_dram_buffer->buffer_type() == tt_metal::BufferType::DRAM;
-    // std::vector<uint32_t> writer_compile_time_args = {(std::uint32_t) output_cb_index, (uint32_t)dst_is_dram};
-    std::vector<uint32_t> writer_compile_time_args = {(uint32_t)dst_is_dram};
+    std::vector<uint32_t> writer_compile_time_args;
+    TensorAccessorArgs(*dst_dram_buffer).append_to(writer_compile_time_args);
 
     /*
      * Create Kernels (Reader, Writer, Compute)
@@ -286,7 +279,7 @@ void matmul_multicore_reuse_mcast(
 
     auto mm_reader_kernel_in0_sender_in1_sender_id = tt_metal::CreateKernel(
         program,
-        "tt_metal/programming_examples/matmul_common/kernels/dataflow/reader_bmm_tile_layout_in0_sender_in1_sender.cpp",
+        "tt_metal/programming_examples/matmul/matmul_common/kernels/dataflow/reader_bmm_tile_layout_in0_sender_in1_sender.cpp",
         in0_sender_in1_sender,
         tt_metal::DataMovementConfig{
             .processor = tt_metal::DataMovementProcessor::RISCV_1,
@@ -295,7 +288,7 @@ void matmul_multicore_reuse_mcast(
 
     auto mm_reader_kernel_in0_sender_in1_receiver_id = tt_metal::CreateKernel(
         program,
-        "tt_metal/programming_examples/matmul_common/kernels/dataflow/"
+        "tt_metal/programming_examples/matmul/matmul_common/kernels/dataflow/"
         "reader_bmm_tile_layout_in0_sender_in1_receiver.cpp",
         in0_sender_in1_receiver,
         tt_metal::DataMovementConfig{
@@ -305,7 +298,7 @@ void matmul_multicore_reuse_mcast(
 
     auto mm_reader_kernel_in0_receiver_in1_sender_id = tt_metal::CreateKernel(
         program,
-        "tt_metal/programming_examples/matmul_common/kernels/dataflow/"
+        "tt_metal/programming_examples/matmul/matmul_common/kernels/dataflow/"
         "reader_bmm_tile_layout_in0_receiver_in1_sender.cpp",
         in0_receiver_in1_sender,
         tt_metal::DataMovementConfig{
@@ -315,7 +308,7 @@ void matmul_multicore_reuse_mcast(
 
     auto mm_reader_kernel_in0_receiver_in1_receiver_id = tt_metal::CreateKernel(
         program,
-        "tt_metal/programming_examples/matmul_common/kernels/dataflow/"
+        "tt_metal/programming_examples/matmul/matmul_common/kernels/dataflow/"
         "reader_bmm_tile_layout_in0_receiver_in1_receiver.cpp",
         in0_receiver_in1_receiver,
         tt_metal::DataMovementConfig{
@@ -325,7 +318,7 @@ void matmul_multicore_reuse_mcast(
 
     auto unary_writer_kernel_noc0_id = tt_metal::CreateKernel(
         program,
-        "tt_metal/programming_examples/matmul_common/kernels/dataflow/writer_bmm_tile_layout.cpp",
+        "tt_metal/programming_examples/matmul/matmul_common/kernels/dataflow/writer_bmm_tile_layout.cpp",
         all_except_left_column,
         tt_metal::DataMovementConfig{
             .processor = tt_metal::DataMovementProcessor::RISCV_0,
@@ -334,7 +327,7 @@ void matmul_multicore_reuse_mcast(
 
     auto unary_writer_kernel_noc1_id = tt_metal::CreateKernel(
         program,
-        "tt_metal/programming_examples/matmul_common/kernels/dataflow/writer_bmm_tile_layout.cpp",
+        "tt_metal/programming_examples/matmul/matmul_common/kernels/dataflow/writer_bmm_tile_layout.cpp",
         left_column,
         tt_metal::DataMovementConfig{
             .processor = tt_metal::DataMovementProcessor::RISCV_0,
@@ -344,7 +337,7 @@ void matmul_multicore_reuse_mcast(
     // Create compute kernel
     auto mm_kernel_id = tt_metal::CreateKernel(
         program,
-        "tt_metal/programming_examples/matmul_common/kernels/compute/bmm_large_block_zm.cpp",
+        "tt_metal/programming_examples/matmul/matmul_common/kernels/compute/bmm_large_block_zm.cpp",
         all_cores,
         tt_metal::ComputeConfig{.math_fidelity = math_fidelity, .compile_args = compute_kernel_args});
 
@@ -471,133 +464,20 @@ void matmul_multicore_reuse_mcast(
         }
     }
 
-    double power_xfer_on=0.0, power_exec=0.0, power_xfer_off=0.0;
-
-    // file exposing the power value at a time
-    char filename[] = "/sys/bus/pci/devices/0000:65:00.0/hwmon/hwmon2/power1_input";
-    tt_power::TTP ttp(filename);
-
     /* Launch program & read in output buffer result into the host vector */
-	struct timeval start_time;	
-	double xfer_on_time=0.0, exec_time=0.0, xfer_off_time=0.0;
 
-    //char profile_xfer_on[] = "tt-power-xfer-on.txt";
-    //char profile_exec[] = "tt-power-exec.txt";
-    //char profile_xfer_off[] = "tt-power-xfer-off.txt";
-
-    bool stop_measurement = false;
-	//ttp.enableProfiling(profile_xfer_on);
-	#pragma omp parallel shared(stop_measurement, xfer_on_time, exec_time, xfer_off_time, power_xfer_on, power_exec, power_xfer_off) num_threads(2)
-    {   
-        int tid = omp_get_thread_num();
-        if(tid == 0) {
-
-			gettimeofday(&start_time, NULL);
-			EnqueueWriteBuffer(cq, src0_dram_buffer, a.data(), false);
-			EnqueueWriteBuffer(cq, src1_dram_buffer, b.data(), false);
-			Finish(cq);
-			xfer_on_time=getElapsedTime(start_time);
-
-	        stop_measurement=true;
-        } else {
-            power_xfer_on = ttp.getPower(stop_measurement);
-        }
-    }  
-
-    stop_measurement = false;
-	//ttp.enableProfiling(profile_exec);
-	ttp.reset();
-	#pragma omp parallel shared(stop_measurement, xfer_on_time, exec_time, xfer_off_time) num_threads(2)
-    {   
-        int tid = omp_get_thread_num();
-        if(tid == 0) {
-
-			gettimeofday(&start_time, NULL);
-			EnqueueProgram(cq, program, false);
-			Finish(cq);
-			exec_time=getElapsedTime(start_time);
-
-	        stop_measurement=true;
-        } else {
-            power_exec = ttp.getPower(stop_measurement);
-        }
-    }  
-
-    stop_measurement = false;
-	//ttp.enableProfiling(profile_xfer_off);
-	ttp.reset();
-	#pragma omp parallel shared(stop_measurement, xfer_on_time, exec_time, xfer_off_time) num_threads(2)
-    {   
-        int tid = omp_get_thread_num();
-        if(tid == 0) {
-
-			gettimeofday(&start_time, NULL);
-			EnqueueReadBuffer(cq, dst_dram_buffer, output.data(), true);
-			Finish(cq);
-			xfer_off_time=getElapsedTime(start_time);
-
-	        stop_measurement=true;
-        } else {
-            power_xfer_off = ttp.getPower(stop_measurement);
-        }
-    }  
- 
-    double total_time = xfer_on_time + exec_time + xfer_off_time;
-    printf("Total time %.4f sec (%.4f sec xferOn, %.4f sec exec, %.4f sec xferOff)\n", total_time, xfer_on_time, exec_time, xfer_off_time);
-    printf("Power xferOn: %.3f, exec: %.3f, xferOff: %.3f\n", power_xfer_on, power_exec, power_xfer_off);
-    printf("Energy xferOn: %.3f J, exec: %.3f J, xferOff: %.3f J\n", power_xfer_on*xfer_on_time, power_exec*exec_time, power_xfer_off*xfer_off_time);
-
-    double energy_xfer_on = power_xfer_on * xfer_on_time;
-    double energy_exec = power_exec * exec_time;
-    double energy_xfer_off = power_xfer_off * xfer_off_time;
-    double total_energy = energy_xfer_on + energy_exec + energy_xfer_off;
-
-    //Write dynamically defined filename, total_time, and power_exec to a file
-    std::ofstream outfile("perf.csv", std::ios_base::app);
-    if (outfile.is_open()) {
-        outfile << __FILE__ << "," << M
-                            << "," << N
-                            << "," << K
-                            << "," << B
-                            << "," << total_time
-                            << "," << xfer_on_time
-                            << "," << exec_time
-                            << "," << xfer_off_time 
-                            << "," << power_xfer_on
-                            << "," << power_exec
-                            << "," << power_xfer_off
-                            << "," << total_energy
-                            << "," << energy_xfer_on
-                            << "," << energy_exec
-                            << "," << energy_xfer_off
-                            << std::endl;
-        outfile.close();
-    } else {
-        std::cerr << "Failed to open file for writing metrics." << std::endl;
-    }
+    EnqueueWriteBuffer(cq, src0_dram_buffer, a.data(), false);
+    EnqueueWriteBuffer(cq, src1_dram_buffer, b.data(), false);
+    EnqueueProgram(cq, program, false);
+    EnqueueReadBuffer(cq, dst_dram_buffer, output.data(), true);
 }
 
 ///////////////////////////////////////
 
-int main(int argc, char* argv[]) {
+int main() {
     bool pass = true;
 
-    if (getenv("TT_METAL_SLOW_DISPATCH_MODE") != nullptr) {
-        TT_THROW("Test not supported w/ slow dispatch, exiting");
-    }
-
-    if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <M> <N> <K> <B>" << std::endl;
-        return 1;
-    }
-
     try {
-        /* Parse command-line arguments */
-        uint32_t M = std::atoi(argv[1]);
-        uint32_t N = std::atoi(argv[2]);
-        uint32_t K = std::atoi(argv[3]);
-        uint32_t B = std::atoi(argv[4]);
-
         /* Silicon accelerator setup */
         constexpr int device_id = 0;
         IDevice* device = CreateDevice(device_id);
@@ -609,6 +489,11 @@ int main(int argc, char* argv[]) {
         // NOTE: Maximum number of tiles in output is 120 * 16^2 = 30,720 (eg. [1, 1, 5120, 6144])
 
         /* Create source data */
+        constexpr uint32_t M = 3584;  // user-defined
+        constexpr uint32_t N = 3072;  // user-defined
+        constexpr uint32_t K = 768;   // user-defined
+        constexpr uint32_t B = 1;     // user-defined
+
         uint32_t Mt = M / TILE_HEIGHT;
         uint32_t Kt = K / TILE_WIDTH;
         uint32_t Nt = N / TILE_WIDTH;
@@ -635,23 +520,23 @@ int main(int argc, char* argv[]) {
         matmul_multicore_reuse_mcast(src0_vec, src1_vec, result_vec, false, M, N, K, B, device);
         result_vec = untilize_nfaces(result_vec, M, N);
 
-        log_info(tt::LogVerif, "Output vector of size {}", result_vec.size());
+        fmt::print("Output vector of size {}\n", result_vec.size());
 
         float pearson = check_bfloat16_vector_pcc(golden_vec, result_vec);
-        log_info(tt::LogVerif, "Metalium vs Golden -- PCC = {}", pearson);
+        fmt::print("Metalium vs Golden -- PCC = {}\n", pearson);
         TT_FATAL(pearson > 0.98, "PCC not high enough. Result PCC: {}, Expected PCC: 0.98", pearson);
 
         pass &= CloseDevice(device);
 
     } catch (const std::exception& e) {
-        tt::log_error(tt::LogTest, "Test failed with exception!");
-        tt::log_error(tt::LogTest, "{}", e.what());
+        fmt::print(stderr, "Test failed with exception!\n");
+        fmt::print(stderr, "{}\n", e.what());
 
         throw;
     }
 
     if (pass) {
-        tt::log_info(tt::LogTest, "Test Passed");
+        fmt::print("Test Passed\n");
     } else {
         TT_THROW("Test Failed");
     }
